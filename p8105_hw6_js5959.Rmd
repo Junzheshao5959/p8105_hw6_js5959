@@ -1,0 +1,159 @@
+---
+title: "Homework 6"
+author: "Junzhe Shao"
+date: "12/4/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(modelr)
+library(mgcv)
+library(glmnet)
+```
+## Problem 1
+
+### data cleaning
+
+
+```{r}
+birthw_dt <- read_csv("birthweight.csv")
+#nrows(birthw_dt %>% drop_na())
+birthw_dt = birthw_dt %>% mutate(babysex = factor(babysex),
+                                 frace = factor(frace),
+                                 malform = factor(malform),
+                                 mrace = factor(mrace))
+```
+we find that we still have `r nrow(birthw_dt %>% drop_na())` variables after removing NA, so there is no missing value for the original data.
+and convert numeric to factor where appropriate.
+
+We try a discovery of variables using lasso.
+```{r}
+y = birthw_dt %>% select(bwt) %>% data.matrix()
+x = birthw_dt %>% select(-bwt) %>% data.matrix()
+set.seed(1)
+cv_model <- cv.glmnet(x, y, alpha = 1)
+#plot(cv_model)
+lambda_se = cv_model$lambda.1se
+best_model <- glmnet(x, y, alpha = 1, lambda = lambda_se)
+c =  coef(best_model)
+inds<-which(c!=0)
+variables<-row.names(c)[inds][-1]
+f = paste("bwt ~ ",paste(variables, collapse = " + "),sep = "")
+#cat(f)
+```
+using the variables selected through lasso, the new formula is `r paste("bwt ~ ",paste(variables, collapse = " + "),sep = "")`
+```{r}
+
+model = lm(as.formula(f), data = birthw_dt)
+model %>% broom::tidy()
+res = add_residuals(birthw_dt, model)
+pred = add_predictions(birthw_dt, model)
+
+#residual and prediction data
+res %>%mutate(
+    pred = pull(pred,pred)
+  ) %>% 
+ggplot(aes(x = pred, y = resid)) + 
+  geom_point() +
+  labs(
+    x = "Prediction",
+    y = "Residuals"
+  )
+```
+
+```{r}
+set.seed(1)
+cv_df <- crossv_mc(birthw_dt, n = 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+cv_result <- cv_df %>% 
+  mutate(
+    lasso_model  = map(train, ~lm(as.formula(f), data = .x)),
+    model_1 = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    model_2  = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead * blength + bhead * babysex + blength * babysex + bhead * blength * babysex, data = .x))
+  ) %>% 
+  mutate(
+    rmse_lasso = map2_dbl(lasso_model, test, ~rmse(model = .x, data = .y)),
+    rmse_model_1    = map2_dbl(model_1, test, ~rmse(model = .x, data = .y)),
+    rmse_model_2 = map2_dbl(model_2, test, ~rmse(model = .x, data = .y))
+  )
+cv_result %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+# Problem 2
+```{r}
+#load data
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+```{r}
+set.seed(1)
+boot_straps <- weather_df %>%
+  modelr::bootstrap(n = 5000)
+
+res_boot = boot_straps %>%
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin , data = .x) ),
+    glance = map(models, broom::glance),
+    tidy= map(models, broom::tidy)
+  ) %>%
+  select(c(-strap,-models))
+
+res_boot %>% unnest(glance)%>% 
+  ggplot(aes(x = r.squared)) + geom_density()
+coef = res_boot %>% unnest(tidy) %>% select(.id,term, estimate) %>% 
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) %>% mutate(log_beta_0_beta_1 = log(`(Intercept)` * tmin))
+res_boot %>% unnest(tidy) %>% select(.id,term, estimate) %>% 
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) %>% mutate(log_beta_0_beta_1 = log(`(Intercept)` * tmin))%>% 
+  ggplot(aes(x = log_beta_0_beta_1)) + geom_density()
+
+```
+Both of these parameters' result of bootstrapping are normally distributed.
+
+
+The 95% confidence intervals for $\hat{r}^{2}$ and $\log \left(\hat{\beta}_{0} * \hat{\beta}_{1}\right)$: 
+```{r}
+res_boot %>% unnest(glance)%>% 
+  summarize(
+    ci_lower = quantile(r.squared, 0.025), 
+    ci_upper = quantile(r.squared, 0.975))
+
+
+res_boot %>% unnest(tidy) %>% select(.id,term, estimate) %>% 
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) %>% mutate(log_beta_0_beta_1 = log(`(Intercept)` * tmin))%>% 
+  summarize(
+    ci_lower = quantile(log_beta_0_beta_1, 0.025), 
+    ci_upper = quantile(log_beta_0_beta_1, 0.975))
+```
+
+
